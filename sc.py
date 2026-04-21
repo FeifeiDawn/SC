@@ -74,9 +74,7 @@ def generate_excel_template():
         'Market': 'AP', 'Channel': 'Amazon', 'SKU_ID': 'USCAF119-CAF',
         'Category': 'CAF', 'Level': 'TOP0', 'Sea_LT': 8, 'Safety_Stock': 2, 'Initial_Overseas_Stock': 5195
     }
-    # 历史销量：固定 12 周 (对应 W4 - W15)
     for i in range(12): dummy_row[f'Past_Sales_W{i+1}'] = 200
-    # 未来预测：生成 37 周 (对应 W16 - W52)
     for i in range(37): dummy_row[f'Forecast_W{i+1}'] = 300
     
     for i in range(4):
@@ -112,9 +110,8 @@ def parse_excel_to_skus(df, t0_date):
                 val = row.get(col_en) if col_en in row else row.get(col_cn)
                 sku['pastSales'].append(safe_float(val, 0.0))
             
-            # 动态探测未来预测数据的长度，并智能截断尾部空数据
             forecast_list = []
-            for i in range(1, 100): # 支持最高 100 周预测跨度
+            for i in range(1, 100):
                 col_en, col_cn = f'Forecast_W{i}', f'W{i+15}'
                 val = None
                 if col_en in df.columns: val = row[col_en]
@@ -126,13 +123,11 @@ def parse_excel_to_skus(df, t0_date):
                 else:
                     forecast_list.append(safe_float(val, 0.0))
             
-            # 剔除尾部纯粹的空单元格 (NaN)
             while forecast_list and forecast_list[-1] is None:
                 forecast_list.pop()
             
-            # 将中间夹杂的空单元格按 0.0 处理
             forecast_list = [0.0 if x is None else x for x in forecast_list]
-            if not forecast_list: forecast_list = [0.0] * 12 # 兜底机制
+            if not forecast_list: forecast_list = [0.0] * 12 
             sku['futureForecast'] = forecast_list
                 
             invalid_texts = ['无在途', 'none', 'nan', 'nat', '#value!', '#n/a', '']
@@ -172,7 +167,7 @@ def parse_excel_to_skus(df, t0_date):
     return sku_list
 
 # ==========================================
-# 核心逻辑引擎与打分器 (动态窗口截断)
+# 核心逻辑引擎与打分器 (引入发货频率约束与总量计算)
 # ==========================================
 def calculate_stats(past_sales, lt):
     mean = np.mean(past_sales)
@@ -181,7 +176,7 @@ def calculate_stats(past_sales, lt):
     sigma_dl = sigma_l_val * std_dev
     return mean, std_dev, sigma_l_val, sigma_dl
 
-def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over):
+def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over, review_period, offset):
     mean, std_dev, sigma_l_val, sigma_dl = calculate_stats(sku['pastSales'], lt)
     current_stock = sku['initialOverseasStock']
     active_pipeline = [p.copy() for p in sku.get('pipeline', [])]
@@ -191,32 +186,28 @@ def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over):
     future_sim = []
     score = 0
 
-    # 动态匹配用户上传的周数
     for i in range(max_future_weeks):
         f = forecast_list[i]
         week_label = f"W{i + 16}" # T0=W16
 
-        # 评分 Base：当前周 + 未来 3 周
         eval_slice = forecast_list[i : min(i+4, max_future_weeks)]
         if len(eval_slice) < 4: eval_slice.extend([forecast_list[-1]] * (4 - len(eval_slice)))
         eval_base = max(np.mean(eval_slice) if eval_slice else 0.0001, 0.0001)
 
-        # 发货 Base：发货后 LT 周内，4 周的平均销量
         ship_slice = forecast_list[i+lt : min(i+lt+4, max_future_weeks)]
         if not ship_slice: ship_slice = [forecast_list[-1]] * 4
         elif len(ship_slice) < 4: ship_slice.extend([forecast_list[-1]] * (4 - len(ship_slice)))
         ship_base = max(np.mean(ship_slice), 0.0001)
 
-        # 本周入库与扣减
         arrived = sum(p['qty'] for p in active_pipeline if p['week'] == i + 1)
         current_stock = current_stock + arrived - f
 
-        # 计算上下边界参数
+        # 计算目标水位 (加入 review_period-1 作为循环盘点期的缓冲，使得拉批次发货逻辑更闭环)
         safety_stock_line = round(ss * eval_base)
-        target_level = round((ss + lt) * ship_base + z_val * sigma_dl)
+        target_level = round((ss + lt + review_period - 1) * ship_base + z_val * sigma_dl)
         total_in_transit = sum(p['qty'] for p in active_pipeline if p['week'] > i + 1)
 
-        # 三阶罚分逻辑
+        # 罚分逻辑
         stockout = 0
         if current_stock < 0:
             stockout = abs(current_stock)
@@ -229,11 +220,12 @@ def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over):
             score += (current_stock - target_level) * pen_over 
 
         # ===============================================
-        # 核心逻辑：尾部时间窗截断 (防止瞎子发货)
+        # 核心：根据【发货频率】与【时间节点偏移】决定本周是否允许发货
         # ===============================================
-        # 只有当我们能够“看到”发货到港后的目标窗口时，才允许执行发货决策
         order_qty = 0
-        if i < max_future_weeks - lt:
+        is_delivery_week = (i - offset) % review_period == 0
+        
+        if is_delivery_week and (i < max_future_weeks - lt):
             gap = target_level - (current_stock + total_in_transit)
             if gap > 0:
                 order_qty = gap * alpha
@@ -253,21 +245,37 @@ def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over):
             "target_weeks": target_level / eval_base
         })
 
-    return future_sim, score, max_future_weeks
+    # 返回增加一项：全生命周期总发货量，用于 AI 寻优时的“同分精益评判”
+    # 修复 KeyError，使用 .get() 方法安全提取
+    total_order_qty = sum(item.get('simOrder', 0) for item in future_sim)
+    return future_sim, score, max_future_weeks, total_order_qty
 
-def auto_optimize(sku, lt, ss, moq, pen_out, pen_ss, pen_over):
+def auto_optimize(sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset):
     best_score = float('inf')
+    best_qty = float('inf') # 记录最低的同分发货量
     best_z, best_a = 0.0, 0.1
+    
     for z in np.arange(0.0, 3.1, 0.2):
         for a in np.arange(0.2, 1.1, 0.1):
-            _, score, _ = run_simulation(sku, lt, ss, moq, z, a, pen_out, pen_ss, pen_over)
-            if score < best_score:
+            _, score, _, total_qty = run_simulation(sku, lt, ss, moq, z, a, pen_out, pen_ss, pen_over, review_period, offset)
+            
+            # AI 的第二重智慧：同分情况下的精益发货原则
+            # 设定 1e-4 为浮点数计算误差容忍度
+            if score < best_score - 1e-4:
+                # 分数获得了实质性突破，直接更新最优解
                 best_score = score
+                best_qty = total_qty
                 best_z, best_a = z, a
+            elif abs(score - best_score) <= 1e-4:
+                # 分数打平，进入抢位赛：谁发货量更少，谁才是真正的最优解
+                if total_qty < best_qty:
+                    best_qty = total_qty
+                    best_z, best_a = z, a
+                    
     return round(best_z, 1), round(best_a, 1)
 
-def update_ai_to_state(sku, lt, ss, moq, pen_out, pen_ss, pen_over):
-    best_z, best_a = auto_optimize(sku, lt, ss, moq, pen_out, pen_ss, pen_over)
+def update_ai_to_state(sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset):
+    best_z, best_a = auto_optimize(sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset)
     st.session_state.z_slider = best_z
     st.session_state.a_slider = best_a
 
@@ -277,7 +285,7 @@ def update_ai_to_state(sku, lt, ss, moq, pen_out, pen_ss, pen_over):
 col1, col2 = st.columns([2, 1.5])
 with col1:
     st.title("🚢 T0 SKU 供应链发货寻优引擎")
-    st.caption("v3.1 图例解耦与时间窗智能截断版 | 自动适配数据周长，截断无效远端发货噪音，独立右侧图例")
+    st.caption("v3.2 发货频率控制与精细化 AI 寻优规则 | 支持 N 周一次打卡发货，内置同分极简法则")
 
 with col2:
     t0_date = st.date_input("🗓️ 设定 T0 历史切片周一日期", value=pd.to_datetime('2026-04-06').date())
@@ -309,7 +317,6 @@ if not st.session_state.sku_data_list:
     st.info("👋 欢迎使用 T0 SKU 供应链寻优沙盘！当前暂无数据。请在右上角上传您的数据文件。")
     st.stop()
 
-# 数据准备与 SKU 切换监听
 sku_options = [s['id'] for s in st.session_state.sku_data_list]
 selected_sku_id = st.selectbox("📌 选择要分析的 SKU (切换SKU将自动执行AI寻优)", sku_options)
 current_sku = next(s for s in st.session_state.sku_data_list if s['id'] == selected_sku_id)
@@ -335,6 +342,19 @@ with left_col:
     st.subheader("⚙️ 物理硬约束")
     lt = st.slider("海运 LT (周)", min_value=0, max_value=24, value=default_lt, step=1)
     ss = st.slider("安全库存底座 (周)", min_value=0, max_value=12, value=default_ss, step=1)
+    
+    # --------------------------------
+    # 新增：发货频率与周期偏移控制
+    # --------------------------------
+    review_period = st.slider("发货频率 (发货周期/周)", min_value=1, max_value=8, value=1, step=1, help="设定每隔几周集中发一次货")
+    
+    # 修复防报错：当频率为1周时，无需设置偏移，滑块禁用
+    if review_period == 1:
+        st.slider("T0 距下次发货节点 (周)", min_value=0, max_value=1, value=0, disabled=True, help="发货频率为 1 周时，每周均可发货，无需设置偏移")
+        offset = 0  # 强制设定变量为 0
+    else:
+        offset = st.slider("T0 距下次发货节点 (周)", min_value=0, max_value=review_period - 1, value=0, step=1, help="0代表本周(T0)正是发货周，1代表下周才发货")
+    
     moq = st.slider("起订量 MOQ", min_value=0, max_value=500, value=0, step=10)
     
     st.markdown("<br>", unsafe_allow_html=True)
@@ -347,17 +367,16 @@ with left_col:
 
     if st.session_state.current_sku_id != selected_sku_id:
         st.session_state.current_sku_id = selected_sku_id
-        update_ai_to_state(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over)
+        update_ai_to_state(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.subheader("🧠 发货决策参数 (已就绪 AI 最优解)")
     z_val = st.slider("安全系数 (Z值)", min_value=0.0, max_value=3.0, step=0.1, key="z_slider")
     alpha = st.slider("平滑系数 (α)", min_value=0.1, max_value=1.0, step=0.1, key="a_slider")
     
-    st.button("✨ 基于当前设定重新 AI 寻优", on_click=update_ai_to_state, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over), use_container_width=True, type="primary")
+    st.button("✨ 基于当前设定重新 AI 寻优", on_click=update_ai_to_state, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset), use_container_width=True, type="primary")
 
-    # 运行推演获取完整结果及动态周数
-    sim_data, total_score, max_future_weeks = run_simulation(current_sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over)
+    sim_data, total_score, max_future_weeks, total_qty_optimized = run_simulation(current_sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over, review_period, offset)
     
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown(f"""
@@ -376,12 +395,11 @@ with right_col:
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     kpi1.markdown(f"<div class='kpi-card'><div class='kpi-title'>T0 初始在库设定</div><div class='kpi-value'>{current_sku['initialOverseasStock']:,}</div><div class='kpi-desc'>当前存量资产起点</div></div>", unsafe_allow_html=True)
     kpi2.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景未来预测均值</div><div class='kpi-value'>{display_forecast_mean:,}</div><div class='kpi-desc'>历史波动率 σ: {round(std_dev)}</div></div>", unsafe_allow_html=True)
-    kpi3.markdown(f"<div class='kpi-card'><div class='kpi-title'>推演总断货次数</div><div class='kpi-value' style='color:#ef4444;'>{stockouts} 周</div><div class='kpi-desc'>管线生命周期内总计</div></div>", unsafe_allow_html=True)
+    kpi3.markdown(f"<div class='kpi-card'><div class='kpi-title'>全期规划总发货量</div><div class='kpi-value' style='color:#8b5cf6;'>{total_qty_optimized:,} 件</div><div class='kpi-desc'>基于同分抠成本法则选出</div></div>", unsafe_allow_html=True)
     kpi4.markdown(f"<div class='kpi-card'><div class='kpi-title'>最终期末推演在库</div><div class='kpi-value' style='color:#3b82f6;'>{sim_data[-1]['inventory'] if sim_data else 0:,}</div><div class='kpi-desc'>视窗终点推演水位</div></div>", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 拼装全量数据：12周历史 + 动态探测出的未来周数
     history_df = pd.DataFrame([{
         "time": f"W{i + 4}", "actualSales": current_sku['pastSales'][i], "forecast": 0, "arrived": 0, 
         "simOrder": 0, "inventory": 0, "targetLevel": 0, "safetyStockLine": 0, "totalPipeline": 0, "stockout": 0,
@@ -394,20 +412,11 @@ with right_col:
     for col in ['time', 'actualSales', 'forecast', 'arrived', 'simOrder', 'inventory', 'targetLevel', 'safetyStockLine', 'totalPipeline', 'stockout', 'eval_base', 'sigma_d', 'sigma_l', 'sigma_dl', 'inventory_weeks', 'pipeline_weeks', 'target_weeks']:
         if col not in full_df.columns: full_df[col] = 0
 
-    # ==========================================
-    # 数据截断：分离 Chart A 和 Chart B 的视窗
-    # ==========================================
-    # Chart A (发货图)：只显示到最后一次有效的发货决策 (总长 - LT)
     valid_order_len = max(0, max_future_weeks - lt)
     df_chart_a = full_df.iloc[: 12 + valid_order_len]
-    
-    # Chart B (水位图)：显示全量到港生命周期
     df_chart_b = full_df
 
-    # -----------------------------
-    # 图表 A：供需与发货动作流 (独立图表，右侧独立图例)
-    # -----------------------------
-    st.markdown("#### 📊 供需与发货动作流 (已自动剔除尾端无效发货盲区)")
+    st.markdown("#### 📊 供需与发货动作流 (受发货频率控制)")
     fig1 = go.Figure()
     
     fig1.add_trace(go.Bar(x=df_chart_a['time'], y=df_chart_a.get('simOrder'), name='策略生成出库单', marker_color='#8b5cf6'))
@@ -423,9 +432,9 @@ with right_col:
     
     fig1.update_layout(
         height=350, 
-        margin=dict(l=0, r=180, t=30, b=0), # 增加右侧边距容纳图例
+        margin=dict(l=0, r=180, t=30, b=0), 
         plot_bgcolor="white", 
-        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02), # 图例垂直放于右侧
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02), 
         hovermode="x unified"
     )
     fig1.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9')
@@ -435,9 +444,6 @@ with right_col:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # -----------------------------
-    # 图表 B：高级运筹学水位渲染 (独立图表，右侧独立图例)
-    # -----------------------------
     st.markdown("#### 🛡️ 运筹水位沙盘：自适应目标区间与管线健康度监控")
     fig2 = go.Figure()
     
@@ -472,9 +478,9 @@ with right_col:
     
     fig2.update_layout(
         height=350, 
-        margin=dict(l=0, r=180, t=30, b=0), # 同步图表 A 的缩进比例，对齐右侧图例
+        margin=dict(l=0, r=180, t=30, b=0), 
         plot_bgcolor="white", 
-        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02), # 图例垂直放于右侧
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02), 
         hovermode="x unified"
     )
     fig2.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9')
