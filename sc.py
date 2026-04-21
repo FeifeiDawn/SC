@@ -457,8 +457,8 @@ with center_col:
     st.markdown("<div style='height: 242px;'></div>", unsafe_allow_html=True)
 
     fig1_b, fig2_b = build_charts(base_sim_data, is_hybrid_mode=False)
-    st.plotly_chart(fig1_b, use_container_width=True)
-    st.plotly_chart(fig2_b, use_container_width=True)
+    st.plotly_chart(fig1_b, use_container_width=True, key="chart_1_base")
+    st.plotly_chart(fig2_b, use_container_width=True, key="chart_2_base")
 
 # ==========================================
 # 组装右列 (人工干预与协同)
@@ -507,5 +507,5 @@ with right_col:
     st.button("✨ 锁定干预值，AI重新寻优剩余节点", on_click=reoptimize_hybrid, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset, discount_factor), use_container_width=True, type="secondary")
 
     fig1_h, fig2_h = build_charts(hyb_sim_data, is_hybrid_mode=True)
-    st.plotly_chart(fig1_h, use_container_width=True)
-    st.plotly_chart(fig2_h, use_container_width=True)
+    st.plotly_chart(fig1_h, use_container_width=True, key="chart_1_hybrid")
+    st.plotly_chart(fig2_h, use_container_width=True, key="chart_2_hybrid")
