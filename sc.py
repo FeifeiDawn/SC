@@ -655,7 +655,7 @@ with chart_col1:
     st.markdown("##### 📊 供需与发货动作流")
     st.plotly_chart(fig1_b, use_container_width=True, key="ai_chart1")
 with chart_col2:
-    st.markdown("##### 🛡️ 自适应目标区间与管线健康度")
+    st.markdown("##### 🛡️ 目标与实际在途在库水平")
     st.plotly_chart(fig2_b, use_container_width=True, key="ai_chart2")
 
 
@@ -728,7 +728,7 @@ with chart_col4:
 # 图表区 3：传统实际发货逻辑对照 
 # ==========================================
 st.markdown("<br><hr>", unsafe_allow_html=True)
-st.subheader("🏛️ 物控部实际发货策略")
+st.subheader("🏛️ 传统发货策略")
 
 leg_sim_data, leg_score, leg_qty = run_legacy_simulation(
     current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_factor, z_base_ref=z_val)
