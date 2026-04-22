@@ -148,9 +148,9 @@ def parse_excel_to_skus(df, t0_date):
                 q_val = row.get(q_col_en) if q_col_en in row else row.get(q_col_cn)
                 
                 if pd.notna(w_val) and pd.notna(q_val):
-                    w_str, q_str = str(w_val).strip().lower(), str(q_val).strip().lower()
-                    if w_str not in invalid_texts and q_str not in invalid_texts:
-                        qty = safe_float(q_str, 0.0)
+                    w_str, q_val_str = str(w_val).strip().lower(), str(q_val).strip().lower()
+                    if w_str not in invalid_texts and q_val_str not in invalid_texts:
+                        qty = safe_float(q_val_str, 0.0)
                         if qty > 0:
                             try:
                                 week_int = int(float(w_str))
@@ -176,7 +176,7 @@ def parse_excel_to_skus(df, t0_date):
     return sku_list
 
 # ==========================================
-# 核心逻辑引擎：1. AI 自适应寻优发货模型
+# 核心逻辑引擎：1. AI 自适应寻优发货模型 (双轨制时空隔离)
 # ==========================================
 def calculate_stats(past_sales, lt):
     rolling_window_size = 12
@@ -219,10 +219,12 @@ def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over, re
         ship_base = max(np.mean(ship_slice), 0.0001)
 
         arrived = sum(p['qty'] for p in active_pipeline if p['week'] == i + 1)
-        current_stock = current_stock + arrived - f
+        current_stock = current_stock + arrived - f 
 
-        # 核心累加：前置期真实消耗预测
-        lt_demand = sum(forecast_list[i : min(i + lt + review_period - 1, len(forecast_list))])
+        # 需求扣减周期 (LT + Review Period)
+        lt_cov = lt + review_period - 1
+        lt_demand = sum(forecast_list[i+1 : min(i + 1 + lt_cov, len(forecast_list))])
+        
         safety_stock_line = round(ss * eval_base)
         target_level = round(lt_demand + ss * ship_base + z_val * sigma_dl)
         total_in_transit = sum(p['qty'] for p in active_pipeline if p['week'] > i + 1)
@@ -251,14 +253,38 @@ def run_simulation(sku, lt, ss, moq, z_val, alpha, pen_out, pen_ss, pen_over, re
             is_manual = True
             active_pipeline.append({"week": i + 1 + lt, "qty": order_qty})
         elif is_delivery_week and (i < max_future_weeks - lt):
-            gap = target_level - (current_stock + total_in_transit)
-            if gap > 0:
-                order_qty = gap * alpha
+            # 【核心架构升级：双轨制时空隔离算法】
+            # 1. 过滤无效远期资产：只取在目标周(i+1+lt)及之前到港的在途为有效资产
+            effective_pipeline = sum(p['qty'] for p in active_pipeline if i + 1 < p['week'] <= i + 1 + lt)
+            effective_assets = current_stock + effective_pipeline
+            
+            # 2. 计算目标周初期的预期库存 (刚需抵扣)
+            projected_inventory = effective_assets - lt_demand
+            
+            # 3. 设定动态安全垫目标
+            buffer_target = ss * ship_base + z_val * sigma_dl
+            
+            # 4. 缺口分流与溢出继承
+            if projected_inventory < 0:
+                base_gap = -projected_inventory  # 刚性缺口：资产连预测都填不满
+                buffer_gap = buffer_target       # 安全垫零继承
+            else:
+                base_gap = 0                     # 刚性缺口：为0
+                buffer_gap = buffer_target - projected_inventory # 安全垫继承溢出的资产
+            
+            if base_gap > 0 or buffer_gap > 0:
+                # 刚需 100% 不打折，安全垫应用平滑系数 α
+                order_qty = max(0, base_gap) + max(0, buffer_gap) * alpha
+                
+                # 最后一步进行 MOQ 与包装规整
                 if moq > 0: order_qty = math.ceil(order_qty / moq) * moq
                 else: order_qty = round(order_qty)
+                
                 active_pipeline.append({"week": i + 1 + lt, "qty": order_qty})
 
-        total_pipeline_qty = round(current_stock + total_in_transit)
+        # 总管线计入当周生成的订单，保证图表即时响应
+        total_pipeline_qty = round(current_stock + total_in_transit + order_qty)
+        
         future_sim.append({
             "index": i, "time": week_label, "period": 'Future', "forecast": round(f), "arrived": arrived,
             "simOrder": order_qty, "isManual": is_manual, "inventory": round(current_stock), 
@@ -279,7 +305,6 @@ def auto_optimize(sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, of
     best_qty = float('inf')
     best_z, best_a = 0.0, 0.1
     
-    # 【重构点】：拓宽 Z 值寻优上限至 3.5，并细化步长至 0.1，实现全景精密扫描
     for z in np.arange(0.0, 3.6, 0.1):
         for a in np.arange(0.1, 1.1, 0.1):
             _, score, _, total_qty, _ = run_simulation(sku, lt, ss, moq, z, a, pen_out, pen_ss, pen_over, review_period, offset, discount_factor, overrides)
@@ -350,7 +375,7 @@ def run_legacy_simulation(sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_
         arrived = sum(p['qty'] for p in active_pipeline if p['week'] == i + 1)
         current_stock = current_stock + arrived - f
 
-        lt_demand = sum(forecast_list[i : min(i + lt, len(forecast_list))])
+        lt_demand = sum(forecast_list[i+1 : min(i + 1 + lt, len(forecast_list))])
         safety_stock_line = round(ss * eval_base)
         target_level_ref = round(lt_demand + ss * ship_base + z_base_ref * sigma_dl)
         total_in_transit = sum(p['qty'] for p in active_pipeline if p['week'] > i + 1)
@@ -375,7 +400,7 @@ def run_legacy_simulation(sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_
         
         if is_delivery_week and (i < max_future_weeks - lt):
             def get_proj_gap(target_w):
-                if target_w < i: return 0
+                if target_w <= i: return 0
                 proj = current_stock 
                 for k in range(i + 1, target_w + 1):
                     arr = sum(p['qty'] for p in active_pipeline if p['week'] == k + 1)
@@ -389,11 +414,11 @@ def run_legacy_simulation(sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_
             gap_p1 = get_proj_gap(i + L_window)     
 
             if gap_m2 > 0:
-                order_qty = gap_m2 + gap_m1
+                order_qty = max(gap_m2, gap_m1)
             elif gap_m1 > 0:
-                order_qty = gap_m1 + gap_0
+                order_qty = max(gap_m1, gap_0)
             elif gap_0 > 0:
-                order_qty = gap_0 + gap_p1
+                order_qty = max(gap_0, gap_p1)
                 
             if moq > 0 and order_qty > 0:
                 order_qty = math.ceil(order_qty / moq) * moq
@@ -403,7 +428,8 @@ def run_legacy_simulation(sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_
             if order_qty > 0:
                 active_pipeline.append({"week": i + 1 + lt, "qty": order_qty})
 
-        total_pipeline_qty = round(current_stock + total_in_transit)
+        total_pipeline_qty = round(current_stock + total_in_transit + order_qty)
+        
         legacy_sim.append({
             "index": i, "time": week_label, "period": 'Future', "forecast": round(f), "arrived": arrived,
             "simOrder": order_qty, "isManual": False, "inventory": round(current_stock), 
@@ -437,8 +463,6 @@ def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
 
     valid_order_len = max(0, max_fw - current_lt)
     df_a = full_df.iloc[: 12 + valid_order_len]
-    
-    # 核心修改：右侧图表（水位图）直接截取从 W16 开始的未来数据，剔除 T0 左侧的历史部分
     df_b = full_df.iloc[12:].copy()
 
     fig1 = go.Figure()
@@ -472,7 +496,6 @@ def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
     fig2.add_trace(go.Scatter(x=df_b['time'], y=df_b.get('totalPipeline'), mode='lines', line_shape='hv', name='总管线(库+途)', line=dict(color='#93c5fd', width=2, dash='dash'), customdata=df_b.get('pipeline_weeks'), hovertemplate="总管线: %{y:.0f}件 (%{customdata:.1f}周)"))
     fig2.add_trace(go.Scatter(x=df_b['time'], y=df_b.get('inventory'), mode='lines+markers', name='期末在库', line=dict(color='#0ea5e9', width=4), marker=dict(size=6, color='white', line=dict(width=2, color='#0ea5e9')), customdata=df_b.get('inventory_weeks'), hovertemplate="在库: %{y:.0f}件 (%{customdata:.1f}周)"))
 
-    # 核心修改：移除 fig2 的 T0 辅助线，因为现在图表直接从 T0 开始（左侧Y轴就是T0基准）
     fig2.update_layout(height=320, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), hovermode="x unified")
     fig2.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9'); fig2.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9')
     
@@ -518,7 +541,7 @@ with header_col2:
 st.divider()
 
 if not st.session_state.sku_data_list:
-    st.info("👋 欢迎使用 T0 SKU 供应链寻优沙盘！当前暂无数据。请在右上角上传您的数据文件。")
+    st.info("👋 欢迎使用 T0 SKU 发货模拟！当前暂无数据。请在右上角上传您的数据文件。")
     st.stop()
 
 # ==========================================
@@ -554,20 +577,11 @@ if st.session_state.get('last_global_params') != global_params or st.session_sta
         st.session_state.last_global_params = global_params
         st.session_state.force_recompute_scores = False
 
-sorted_skus = sorted(
-    st.session_state.sku_data_list,
-    key=lambda x: st.session_state.sku_scores_cache.get(x['id'], {}).get('diff', 0),
-    reverse=True
-)
+# 固定 SKU 顺序为导入时的原始顺序，移除基于分数的动态排序
+fixed_skus = st.session_state.sku_data_list
 
-def format_sku_option(sku_id):
-    scores = st.session_state.sku_scores_cache.get(sku_id, {})
-    diff = scores.get('diff', 0)
-    ai_sc = scores.get('ai_score', 0)
-    leg_sc = scores.get('legacy_score', 0)
-    return f"{sku_id} (优化空间: {diff} | 传统: {leg_sc} | AI: {ai_sc})"
-
-selected_sku_id = st.selectbox("📌 选择要分析的 SKU (已按“AI新策略优化空间”智能降序排列)", [s['id'] for s in sorted_skus], format_func=format_sku_option)
+# 仅显示 SKU ID，移除动态分数拼接，防止 Streamlit 状态丢失乱跳
+selected_sku_id = st.selectbox("📌 选择要分析的 SKU", [s['id'] for s in fixed_skus])
 current_sku = next(s for s in st.session_state.sku_data_list if s['id'] == selected_sku_id)
 
 st.markdown(f"""
@@ -623,9 +637,8 @@ with col_c5:
     st.markdown("<br>", unsafe_allow_html=True)
     st.button("✨ 恢复当前 SKU 的 AI 理论最优解", on_click=restore_ai_optimal, args=(selected_sku_id,), use_container_width=True, type="primary")
 
-st.markdown("#### 🧠 寻优参数结果")
+st.markdown("#### 🧠 寻优算法结果")
 col_a1, col_a2, col_a3 = st.columns([1, 1, 3])
-# 【修改点】：Z值的滑块上限同步调高到 3.5
 z_val = col_a1.slider("安全系数 (Z值)", min_value=0.0, max_value=3.5, step=0.1, key="z_slider")
 alpha = col_a2.slider("平滑系数 (α)", min_value=0.1, max_value=1.0, step=0.1, key="a_slider")
 
@@ -655,7 +668,7 @@ with chart_col1:
     st.markdown("##### 📊 供需与发货动作流")
     st.plotly_chart(fig1_b, use_container_width=True, key="ai_chart1")
 with chart_col2:
-    st.markdown("##### 🛡️ 目标与实际在途在库水平")
+    st.markdown("##### 🛡️ 目标/实际在途在库水平")
     st.plotly_chart(fig2_b, use_container_width=True, key="ai_chart2")
 
 
@@ -709,12 +722,12 @@ if new_overrides != st.session_state.manual_overrides:
 score_color = "#10b981" if hyb_score < base_score else ("#ef4444" if hyb_score > base_score else "#0f172a")
 
 col_h1, col_h2, col_h3, col_h4 = st.columns(4)
-col_h1.markdown(f"<div class='kpi-card'><div class='kpi-title'>协同总罚分 (Z={st.session_state.z_hyb:.1f}, α={st.session_state.a_hyb:.1f})</div><div class='kpi-value' style='color:{score_color};'>{round(hyb_score):,}</div></div>", unsafe_allow_html=True)
+col_h1.markdown(f"<div class='kpi-card'><div class='kpi-title'>总罚分 (Z={st.session_state.z_hyb:.1f}, α={st.session_state.a_hyb:.1f})</div><div class='kpi-value' style='color:{score_color};'>{round(hyb_score):,}</div></div>", unsafe_allow_html=True)
 col_h2.markdown(f"<div class='kpi-card'><div class='kpi-title'>断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in hyb_sim_data if d['stockout'] > 0])}</div></div>", unsafe_allow_html=True)
-col_h3.markdown(f"<div class='kpi-card'><div class='kpi-title'>干预后总发货量</div><div class='kpi-value' style='color:#f97316;'>{hyb_qty:,} 件</div></div>", unsafe_allow_html=True)
+col_h3.markdown(f"<div class='kpi-card'><div class='kpi-title'>干预后发货量</div><div class='kpi-value' style='color:#f97316;'>{hyb_qty:,} 件</div></div>", unsafe_allow_html=True)
 with col_h4:
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.button("✨ 锁定干预值，重新寻优", on_click=reoptimize_hybrid, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset, discount_factor), use_container_width=True, type="secondary", key="hyb_btn")
+    st.button("✨ 锁定干预值，让AI重新寻优", on_click=reoptimize_hybrid, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset, discount_factor), use_container_width=True, type="secondary", key="hyb_btn")
 
 fig1_h, fig2_h = build_charts(hyb_sim_data, original_weeks, lt, mode='hybrid')
 chart_col3, chart_col4 = st.columns(2)
@@ -734,7 +747,7 @@ leg_sim_data, leg_score, leg_qty = run_legacy_simulation(
     current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_factor, z_base_ref=z_val)
 
 col_l1, col_l2, col_l3, col_l4 = st.columns(4)
-col_l1.markdown(f"<div class='kpi-card'><div class='kpi-title'>传统策略有效总罚分</div><div class='kpi-value' style='color:#ef4444;'>{round(leg_score):,}</div></div>", unsafe_allow_html=True)
+col_l1.markdown(f"<div class='kpi-card'><div class='kpi-title'>有效总罚分</div><div class='kpi-value' style='color:#ef4444;'>{round(leg_score):,}</div></div>", unsafe_allow_html=True)
 col_l2.markdown(f"<div class='kpi-card'><div class='kpi-title'>断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in leg_sim_data if d['stockout'] > 0])} 周</div></div>", unsafe_allow_html=True)
 col_l3.markdown(f"<div class='kpi-card'><div class='kpi-title'>传统有效发货量</div><div class='kpi-value' style='color:#ec4899;'>{leg_qty:,} 件</div></div>", unsafe_allow_html=True)
 col_l4.markdown(f"<div class='kpi-card'><div class='kpi-title'>最终期末在库</div><div class='kpi-value' style='color:#3b82f6;'>{leg_sim_data[-1]['inventory'] if leg_sim_data else 0:,} 件</div></div>", unsafe_allow_html=True)
