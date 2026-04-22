@@ -10,7 +10,7 @@ import io
 # ==========================================
 # 页面配置与样式
 # ==========================================
-st.set_page_config(page_title="T0 SKU 供应链协同寻优沙盘", layout="wide", page_icon="🚢")
+st.set_page_config(page_title="T0 SKU 发货模拟", layout="wide", page_icon="🚢")
 
 st.markdown("""
     <style>
@@ -483,8 +483,7 @@ def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
 # ==========================================
 header_col1, header_col2 = st.columns([2, 1.5])
 with header_col1:
-    st.title("🚢 T0 SKU 供应链协同寻优沙盘")
-    st.caption("v11.0 深度防线版 | 拓宽 Z 值上限至 3.5，全精度步长匹配极端长尾波动")
+    st.title("🚢 T0 SKU 发货模拟")
 
 with header_col2:
     t0_date = st.date_input("🗓️ 设定 T0 历史切片周一日期", value=pd.to_datetime('2026-04-13').date())
@@ -584,7 +583,7 @@ st.markdown(f"""
 # ==========================================
 # 控制台横向铺开区域
 # ==========================================
-st.markdown("### ⚙️ 全局物理硬约束")
+st.markdown("### ⚙️ 约束参数")
 
 col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
 lt = col_p1.slider("海运 LT (周)", min_value=0, max_value=24, value=st.session_state.global_lt, key="global_lt", step=1)
@@ -600,7 +599,7 @@ else:
     
 moq = col_p5.slider("起订量 MOQ", min_value=0, max_value=500, value=st.session_state.global_moq, key="global_moq", step=10)
 
-st.markdown("### ⚖️ 代价函数设定与 AI 寻优")
+st.markdown("### ⚖️ 罚分机制参数设定")
 col_c1, col_c2, col_c3, col_c4, col_c5 = st.columns(5)
 pen_out = col_c1.number_input("🚨 断货罚分权重 (/件)", value=st.session_state.global_pen_out, key="global_pen_out", step=0.5)
 pen_ss = col_c2.number_input("⚠️ 安全线罚分权重 (/件)", value=st.session_state.global_pen_ss, key="global_pen_ss", step=0.1)
@@ -624,7 +623,7 @@ with col_c5:
     st.markdown("<br>", unsafe_allow_html=True)
     st.button("✨ 恢复当前 SKU 的 AI 理论最优解", on_click=restore_ai_optimal, args=(selected_sku_id,), use_container_width=True, type="primary")
 
-st.markdown("#### 🧠 AI 推荐决策参数设定")
+st.markdown("#### 🧠 寻优参数结果")
 col_a1, col_a2, col_a3 = st.columns([1, 1, 3])
 # 【修改点】：Z值的滑块上限同步调高到 3.5
 z_val = col_a1.slider("安全系数 (Z值)", min_value=0.0, max_value=3.5, step=0.1, key="z_slider")
@@ -642,13 +641,13 @@ hyb_sim_data, hyb_score, _, hyb_qty, _ = run_simulation(
 # 图表区 1：🤖 纯粹 AI 理论最优解
 # ==========================================
 st.markdown("<br><hr>", unsafe_allow_html=True)
-st.subheader("🤖 纯粹 AI 理论最优解 (Baseline)")
+st.subheader("🤖 AI理论最优解")
 
 col_ai1, col_ai2, col_ai3, col_ai4 = st.columns(4)
 col_ai1.markdown(f"<div class='kpi-card'><div class='kpi-title'>总罚分 (有效区间内)</div><div class='kpi-value'>{round(base_score):,}</div></div>", unsafe_allow_html=True)
-col_ai2.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in base_sim_data if d['stockout'] > 0])}</div></div>", unsafe_allow_html=True)
-col_ai3.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景规划总发货</div><div class='kpi-value' style='color:#8b5cf6;'>{base_qty:,} 件</div></div>", unsafe_allow_html=True)
-col_ai4.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景期末在库</div><div class='kpi-value' style='color:#3b82f6;'>{base_sim_data[-1]['inventory'] if base_sim_data else 0:,} 件</div></div>", unsafe_allow_html=True)
+col_ai2.markdown(f"<div class='kpi-card'><div class='kpi-title'>断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in base_sim_data if d['stockout'] > 0])}</div></div>", unsafe_allow_html=True)
+col_ai3.markdown(f"<div class='kpi-card'><div class='kpi-title'>规划总发货</div><div class='kpi-value' style='color:#8b5cf6;'>{base_qty:,} 件</div></div>", unsafe_allow_html=True)
+col_ai4.markdown(f"<div class='kpi-card'><div class='kpi-title'>最终期末在库</div><div class='kpi-value' style='color:#3b82f6;'>{base_sim_data[-1]['inventory'] if base_sim_data else 0:,} 件</div></div>", unsafe_allow_html=True)
 
 fig1_b, fig2_b = build_charts(base_sim_data, original_weeks, lt, mode='ai')
 chart_col1, chart_col2 = st.columns(2)
@@ -664,7 +663,7 @@ with chart_col2:
 # 图表区 2：🧑‍🔧 人工干预与 AI 协同重算
 # ==========================================
 st.markdown("<br><hr>", unsafe_allow_html=True)
-st.subheader("🧑‍🔧 人工干预与 AI 协同重算 (Human-in-the-loop)")
+st.subheader("🧑‍🔧 人工干预")
 
 valid_order_len = max(0, original_weeks - lt)
 data_dict = {"指标": ["AI 理论建议 (件)", "👉 人工干预 (件)"]}
@@ -711,11 +710,11 @@ score_color = "#10b981" if hyb_score < base_score else ("#ef4444" if hyb_score >
 
 col_h1, col_h2, col_h3, col_h4 = st.columns(4)
 col_h1.markdown(f"<div class='kpi-card'><div class='kpi-title'>协同总罚分 (Z={st.session_state.z_hyb:.1f}, α={st.session_state.a_hyb:.1f})</div><div class='kpi-value' style='color:{score_color};'>{round(hyb_score):,}</div></div>", unsafe_allow_html=True)
-col_h2.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in hyb_sim_data if d['stockout'] > 0])}</div></div>", unsafe_allow_html=True)
-col_h3.markdown(f"<div class='kpi-card'><div class='kpi-title'>干预后全景发货量</div><div class='kpi-value' style='color:#f97316;'>{hyb_qty:,} 件</div></div>", unsafe_allow_html=True)
+col_h2.markdown(f"<div class='kpi-card'><div class='kpi-title'>断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in hyb_sim_data if d['stockout'] > 0])}</div></div>", unsafe_allow_html=True)
+col_h3.markdown(f"<div class='kpi-card'><div class='kpi-title'>干预后总发货量</div><div class='kpi-value' style='color:#f97316;'>{hyb_qty:,} 件</div></div>", unsafe_allow_html=True)
 with col_h4:
     st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-    st.button("✨ 锁定干预值，让AI重新寻优兜底", on_click=reoptimize_hybrid, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset, discount_factor), use_container_width=True, type="secondary", key="hyb_btn")
+    st.button("✨ 锁定干预值，重新寻优", on_click=reoptimize_hybrid, args=(current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, review_period, offset, discount_factor), use_container_width=True, type="secondary", key="hyb_btn")
 
 fig1_h, fig2_h = build_charts(hyb_sim_data, original_weeks, lt, mode='hybrid')
 chart_col3, chart_col4 = st.columns(2)
@@ -729,16 +728,16 @@ with chart_col4:
 # 图表区 3：传统实际发货逻辑对照 
 # ==========================================
 st.markdown("<br><hr>", unsafe_allow_html=True)
-st.subheader("🏛️ 传统发货策略回测对照 (10+2 前瞻回溯)")
+st.subheader("🏛️ 物控部实际发货策略")
 
 leg_sim_data, leg_score, leg_qty = run_legacy_simulation(
     current_sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_factor, z_base_ref=z_val)
 
 col_l1, col_l2, col_l3, col_l4 = st.columns(4)
 col_l1.markdown(f"<div class='kpi-card'><div class='kpi-title'>传统策略有效总罚分</div><div class='kpi-value' style='color:#ef4444;'>{round(leg_score):,}</div></div>", unsafe_allow_html=True)
-col_l2.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in leg_sim_data if d['stockout'] > 0])} 周</div></div>", unsafe_allow_html=True)
+col_l2.markdown(f"<div class='kpi-card'><div class='kpi-title'>断货周数</div><div class='kpi-value' style='color:#ef4444;'>{len([d for d in leg_sim_data if d['stockout'] > 0])} 周</div></div>", unsafe_allow_html=True)
 col_l3.markdown(f"<div class='kpi-card'><div class='kpi-title'>传统有效发货量</div><div class='kpi-value' style='color:#ec4899;'>{leg_qty:,} 件</div></div>", unsafe_allow_html=True)
-col_l4.markdown(f"<div class='kpi-card'><div class='kpi-title'>全景期末在库</div><div class='kpi-value' style='color:#3b82f6;'>{leg_sim_data[-1]['inventory'] if leg_sim_data else 0:,} 件</div></div>", unsafe_allow_html=True)
+col_l4.markdown(f"<div class='kpi-card'><div class='kpi-title'>最终期末在库</div><div class='kpi-value' style='color:#3b82f6;'>{leg_sim_data[-1]['inventory'] if leg_sim_data else 0:,} 件</div></div>", unsafe_allow_html=True)
 
 fig1_leg, fig2_leg = build_charts(leg_sim_data, original_weeks, lt, mode='legacy')
 
