@@ -424,8 +424,8 @@ def run_legacy_simulation(sku, lt, ss, moq, pen_out, pen_ss, pen_over, discount_
 # ==========================================
 def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
     history_df = pd.DataFrame([{
-        "time": f"W{i + 4}", "actualSales": current_sku['pastSales'][i], "forecast": 0, "arrived": 0, 
-        "simOrder": 0, "isManual": False, "inventory": 0, "targetLevel": 0, "safetyStockLine": 0, "totalPipeline": 0, "stockout": 0,
+        "time": f"W{i + 4}", "actualSales": current_sku['pastSales'][i], "forecast": np.nan, "arrived": 0, 
+        "simOrder": 0, "isManual": False, "inventory": np.nan, "targetLevel": np.nan, "safetyStockLine": np.nan, "totalPipeline": np.nan, "stockout": 0,
         "eval_base": max(current_sku['pastSales'][i], 0.0001), "sigma_d": 0, "sqrt_lt": 0, "sigma_dl": 0,
         "inventory_weeks": 0, "pipeline_weeks": 0, "target_weeks": 0
     } for i in range(12)])
@@ -437,7 +437,9 @@ def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
 
     valid_order_len = max(0, max_fw - current_lt)
     df_a = full_df.iloc[: 12 + valid_order_len]
-    df_b = full_df
+    
+    # 核心修改：右侧图表（水位图）直接截取从 W16 开始的未来数据，剔除 T0 左侧的历史部分
+    df_b = full_df.iloc[12:].copy()
 
     fig1 = go.Figure()
     
@@ -470,7 +472,7 @@ def build_charts(sim_data_to_use, max_fw, current_lt, mode='ai'):
     fig2.add_trace(go.Scatter(x=df_b['time'], y=df_b.get('totalPipeline'), mode='lines', line_shape='hv', name='总管线(库+途)', line=dict(color='#93c5fd', width=2, dash='dash'), customdata=df_b.get('pipeline_weeks'), hovertemplate="总管线: %{y:.0f}件 (%{customdata:.1f}周)"))
     fig2.add_trace(go.Scatter(x=df_b['time'], y=df_b.get('inventory'), mode='lines+markers', name='期末在库', line=dict(color='#0ea5e9', width=4), marker=dict(size=6, color='white', line=dict(width=2, color='#0ea5e9')), customdata=df_b.get('inventory_weeks'), hovertemplate="在库: %{y:.0f}件 (%{customdata:.1f}周)"))
 
-    fig2.add_vline(x=11.5, line_dash="dash", line_color="#94a3b8", annotation_text="T0", annotation_position="top left")
+    # 核心修改：移除 fig2 的 T0 辅助线，因为现在图表直接从 T0 开始（左侧Y轴就是T0基准）
     fig2.update_layout(height=320, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor="white", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), hovermode="x unified")
     fig2.update_xaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9'); fig2.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#f1f5f9')
     
